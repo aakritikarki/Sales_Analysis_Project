@@ -468,17 +468,119 @@ ORDER BY month;
 monthly_df = pd.read_sql(query, engine)
 monthly_df
 
-import matplotlib.pyplot as plt
-import seaborn as sns
+query =  '''
+DELIMITER $$
 
-plt.figure(figsize=(10,5))
-sns.lineplot(data=monthly_df, x="month", y="revenue", marker="o")
-plt.title("Monthly Revenue Trend")
-plt.xlabel("Month")
+CREATE TRIGGER trg_validate_quantity
+BEFORE INSERT ON order_items
+FOR EACH ROW
+BEGIN
+    IF NEW.quantity <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Quantity must be greater than zero';
+    END IF;
+END$$
+
+DELIMITER ;
+'''
+
+query = '''
+DELIMITER $$
+
+CREATE TRIGGER trg_auto_complete_order
+AFTER INSERT ON payments
+FOR EACH ROW
+BEGIN
+    DECLARE total_paid DECIMAL(10,2);
+    DECLARE order_total DECIMAL(10,2);
+
+    SELECT COALESCE(SUM(amount),0)
+    INTO total_paid
+    FROM payments
+    WHERE order_id = NEW.order_id;
+
+    SELECT COALESCE(SUM(quantity * item_price),0)
+    INTO order_total
+    FROM order_items
+    WHERE order_id = NEW.order_id;
+
+    IF total_paid >= order_total THEN
+        UPDATE orders
+        SET order_status = 'Completed'
+        WHERE order_id = NEW.order_id;
+    END IF;
+END$$
+
+DELIMITER ;
+'''
+query = '''
+CREATE EVENT ev_data_quality_check
+ON SCHEDULE EVERY 1 DAY
+DO
+INSERT INTO data_quality_log
+SELECT
+    NOW(),
+    (SELECT COUNT(*) FROM orders WHERE order_date IS NULL),
+    (SELECT COUNT(*) FROM payments WHERE amount <= 0);
+'''
+import pandas as pd
+
+query = """
+DROP TABLE IF EXISTS fact_sales;
+
+CREATE TABLE fact_sales AS
+SELECT
+    o.order_id,
+    o.customer_id,
+    oi.product_id,
+    o.order_date,
+    oi.quantity,
+    oi.item_price,
+    (oi.quantity * oi.item_price) AS gross_sales
+FROM orders o
+JOIN order_items oi
+  ON o.order_id = oi.order_id
+WHERE o.order_status = 'Completed';
+
+"""
+import pandas as pd
+
+query = """
+SELECT
+    COUNT(DISTINCT order_id) AS total_orders,
+    COUNT(DISTINCT customer_id) AS total_customers,
+    ROUND(SUM(gross_sales),2) AS total_revenue,
+    ROUND(AVG(gross_sales),2) AS avg_line_value
+FROM fact_sales;
+"""
+df_kpi = pd.read_sql(query, engine)
+print(df_kpi)
+
+query = """
+SELECT
+    order_date,
+    SUM(gross_sales) AS daily_revenue
+FROM fact_sales
+GROUP BY order_date
+ORDER BY order_date;
+"""
+df = pd.read_sql(query, engine)
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+sns.set_theme(style="whitegrid")
+
+plt.figure()
+sns.lineplot(data=df, x="order_date", y="daily_revenue")
+plt.title("Daily Revenue Trend")
+plt.xlabel("Date")
 plt.ylabel("Revenue")
 plt.xticks(rotation=45)
 plt.tight_layout()
 plt.show()
+
+
+
 
 
 
